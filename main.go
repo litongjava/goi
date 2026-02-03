@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"log"
 	"os"
 	"os/exec"
@@ -13,15 +12,10 @@ import (
 func main() {
 	log.SetFlags(0)
 
-	var branch string
-	flag.StringVar(&branch, "b", "", "branch name")
-	flag.Parse()
-
-	if flag.NArg() < 1 {
-		log.Fatalf("usage: mvni <repo_url> [-b branch]")
+	repoURL, branch, err := parseArgs(os.Args[1:])
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
-
-	repoURL := flag.Arg(0)
 	repoName, err := repoDirName(repoURL)
 	if err != nil {
 		log.Fatalf("invalid repo url: %v", err)
@@ -53,9 +47,20 @@ func main() {
 	}
 
 	if branch != "" {
+		if err := runCmd(repoPath, "git", "fetch", "--all", "--prune"); err != nil {
+			log.Fatalf("git fetch failed: %v", err)
+		}
 		log.Printf("checking out branch %s", branch)
-		if err := runCmd(repoPath, "git", "checkout", branch); err != nil {
-			log.Fatalf("git checkout failed: %v", err)
+		if hasLocalRef(repoPath, "refs/heads/"+branch) {
+			if err := runCmd(repoPath, "git", "checkout", branch); err != nil {
+				log.Fatalf("git checkout failed: %v", err)
+			}
+		} else if hasLocalRef(repoPath, "refs/remotes/origin/"+branch) {
+			if err := runCmd(repoPath, "git", "checkout", "-b", branch, "--track", "origin/"+branch); err != nil {
+				log.Fatalf("git checkout failed: %v", err)
+			}
+		} else {
+			log.Fatalf("branch not found locally or on origin: %s", branch)
 		}
 	}
 
@@ -68,6 +73,46 @@ func main() {
 	if err := runCmd(repoPath, "build"); err != nil {
 		log.Fatalf("build failed: %v", err)
 	}
+}
+
+func parseArgs(args []string) (string, string, error) {
+	var repoURL string
+	var branch string
+
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "" {
+			continue
+		}
+		if arg == "-b" {
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return "", "", errors.New("usage: goi <repo_url> [-b branch]")
+			}
+			branch = strings.TrimSpace(args[i+1])
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-b=") {
+			branch = strings.TrimSpace(strings.TrimPrefix(arg, "-b="))
+			if branch == "" {
+				return "", "", errors.New("usage: goi <repo_url> [-b branch]")
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			return "", "", errors.New("usage: goi <repo_url> [-b branch]")
+		}
+		if repoURL == "" {
+			repoURL = arg
+		} else {
+			return "", "", errors.New("usage: goi <repo_url> [-b branch]")
+		}
+	}
+
+	if repoURL == "" {
+		return "", "", errors.New("usage: goi <repo_url> [-b branch]")
+	}
+	return repoURL, branch, nil
 }
 
 func repoDirName(repoURL string) (string, error) {
@@ -90,4 +135,10 @@ func runCmd(dir string, name string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func hasLocalRef(dir, ref string) bool {
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", ref)
+	cmd.Dir = dir
+	return cmd.Run() == nil
 }
